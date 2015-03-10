@@ -1,5 +1,5 @@
 /*
-	Copyright 2012 bigbiff/Dees_Troy TeamWin
+	Copyright 2014 TeamWin
 	This file is part of TWRP/TeamWin Recovery Project.
 
 	TWRP is free software: you can redistribute it and/or modify
@@ -39,6 +39,7 @@
 #include "twrpDigest.hpp"
 #include "twrpDU.hpp"
 #include "set_metadata.h"
+#include "tw_atomic.hpp"
 
 #ifdef TW_HAS_MTP
 #include "mtp/mtp_MtpServer.hpp"
@@ -59,6 +60,8 @@ extern bool datamedia;
 TWPartitionManager::TWPartitionManager(void) {
 	mtp_was_enabled = false;
 	mtp_write_fd = -1;
+	stop_backup.set_value(0);
+	tar_fork_pid = 0;
 }
 
 int TWPartitionManager::Process_Fstab(string Fstab_Filename, bool Display_Error) {
@@ -523,6 +526,8 @@ bool TWPartitionManager::Backup_Partition(TWPartition* Part, string Backup_Folde
 	float pos;
 	unsigned long long total_size, current_size;
 
+	string backup_log = Backup_Folder + "recovery.log";
+
 	if (Part == NULL)
 		return true;
 
@@ -559,7 +564,7 @@ bool TWPartitionManager::Backup_Partition(TWPartition* Part, string Backup_Folde
 	TWFunc::SetPerformanceMode(true);
 	time(&start);
 
-	if (Part->Backup(Backup_Folder, &total_size, &current_size)) {
+	if (Part->Backup(Backup_Folder, &total_size, &current_size, tar_fork_pid)) {
 		bool md5Success = false;
 		current_size += Part->Backup_Size;
 		pos = (float)((float)(current_size) / (float)(total_size));
@@ -569,8 +574,11 @@ bool TWPartitionManager::Backup_Partition(TWPartition* Part, string Backup_Folde
 
 			for (subpart = Partitions.begin(); subpart != Partitions.end(); subpart++) {
 				if ((*subpart)->Can_Be_Backed_Up && (*subpart)->Is_SubPartition && (*subpart)->SubPartition_Of == Part->Mount_Point) {
-					if (!(*subpart)->Backup(Backup_Folder, &total_size, &current_size)) {
+					if (!(*subpart)->Backup(Backup_Folder, &total_size, &current_size, tar_fork_pid)) {
 						TWFunc::SetPerformanceMode(false);
+						Clean_Backup_Folder(Backup_Folder);
+						TWFunc::copy_file("/tmp/recovery.log", backup_log, 0644);
+						tw_set_default_metadata(backup_log.c_str());
 						return false;
 					}
 					sync();
@@ -605,13 +613,69 @@ bool TWPartitionManager::Backup_Partition(TWPartition* Part, string Backup_Folde
 		TWFunc::SetPerformanceMode(false);
 		return md5Success;
 	} else {
+		Clean_Backup_Folder(Backup_Folder);
+		TWFunc::copy_file("/tmp/recovery.log", backup_log, 0644);
+		tw_set_default_metadata(backup_log.c_str());
 		TWFunc::SetPerformanceMode(false);
 		return false;
 	}
+	return 0;
+}
+
+void TWPartitionManager::Clean_Backup_Folder(string Backup_Folder) {
+	DIR *d = opendir(Backup_Folder.c_str());
+	struct dirent *p;
+	int r;
+
+	gui_print("Backup Failed.\nCleaning Backup Folder\n");
+
+	if (d == NULL) {
+		LOGERR("Error opening dir: '%s'\n", Backup_Folder.c_str());
+		return;
+	}
+
+	while ((p = readdir(d))) {
+		if (!strcmp(p->d_name, ".") || !strcmp(p->d_name, ".."))
+			continue;
+
+		string path = Backup_Folder + p->d_name;
+
+		size_t dot = path.find_last_of(".") + 1;
+		if (path.substr(dot) == "win" || path.substr(dot) == "md5" || path.substr(dot) == "info") {
+			r = unlink(path.c_str());
+			if (r != 0) {
+				LOGINFO("Unable to unlink '%s: %s'\n", path.c_str(), strerror(errno));
+			}
+		}
+	}
+	closedir(d);
+}
+
+int TWPartitionManager::Cancel_Backup() {
+	string Backup_Folder, Backup_Name, Full_Backup_Path;
+
+	stop_backup.set_value(1);
+
+	if (tar_fork_pid != 0) {
+		DataManager::GetValue(TW_BACKUP_NAME, Backup_Name);
+		DataManager::GetValue(TW_BACKUPS_FOLDER_VAR, Backup_Folder);
+		Full_Backup_Path = Backup_Folder + "/" + Backup_Name + "/";
+		LOGINFO("Killing pid: %d\n", tar_fork_pid);
+		kill(tar_fork_pid, SIGUSR2);
+		while (kill(tar_fork_pid, 0) == 0) {
+			usleep(1000);
+		}
+		LOGINFO("Backup_Run stopped and returning false, backup cancelled.\n");
+		LOGINFO("Removing directory %s\n", Full_Backup_Path.c_str());
+		TWFunc::removeDir(Full_Backup_Path, false);
+		tar_fork_pid = 0;
+	}
+
+	return 0;
 }
 
 int TWPartitionManager::Run_Backup(void) {
-	int check, do_md5, partition_count = 0;
+	int check, do_md5, partition_count = 0, disable_free_space_check = 0;
 	string Backup_Folder, Backup_Name, Full_Backup_Path, Backup_List, backup_path;
 	unsigned long long total_bytes = 0, file_bytes = 0, img_bytes = 0, free_space = 0, img_bytes_remaining, file_bytes_remaining, subpart_size;
 	unsigned long img_time = 0, file_time = 0;
@@ -621,6 +685,7 @@ int TWPartitionManager::Run_Backup(void) {
 	struct tm *t;
 	time_t start, stop, seconds, total_start, total_stop;
 	size_t start_pos = 0, end_pos = 0;
+	stop_backup.set_value(0);
 	seconds = time(0);
 	t = localtime(&seconds);
 
@@ -698,10 +763,14 @@ int TWPartitionManager::Run_Backup(void) {
 		LOGERR("Unable to locate storage device.\n");
 		return false;
 	}
-	if (free_space - (32 * 1024 * 1024) < total_bytes) {
-		// We require an extra 32MB just in case
-		LOGERR("Not enough free space on storage.\n");
-		return false;
+
+	DataManager::GetValue("tw_disable_free_space", disable_free_space_check);
+	if (!disable_free_space_check) {
+		if (free_space - (32 * 1024 * 1024) < total_bytes) {
+			// We require an extra 32MB just in case
+			LOGERR("Not enough free space on storage.\n");
+			return false;
+		}
 	}
 	img_bytes_remaining = img_bytes;
 	file_bytes_remaining = file_bytes;
@@ -718,6 +787,8 @@ int TWPartitionManager::Run_Backup(void) {
 	start_pos = 0;
 	end_pos = Backup_List.find(";", start_pos);
 	while (end_pos != string::npos && start_pos < Backup_List.size()) {
+		if (stop_backup.get_value() != 0)
+			return -1;
 		backup_path = Backup_List.substr(start_pos, end_pos - start_pos);
 		backup_part = Find_Partition_By_Path(backup_path);
 		if (backup_part != NULL) {
@@ -1915,7 +1986,6 @@ bool TWPartitionManager::Enable_MTP(void) {
 	}
 	//Launch MTP Responder
 	LOGINFO("Starting MTP\n");
-	int count = 0;
 
 	int mtppipe[2];
 
@@ -1938,41 +2008,44 @@ bool TWPartitionManager::Enable_MTP(void) {
 		TWFunc::write_file("/sys/class/android_usb/android0/idProduct", productstr);
 		property_set("sys.usb.config", "mtp,adb");
 	}
-	std::vector<TWPartition*>::iterator iter;
 	/* To enable MTP debug, use the twrp command line feature to
 	 * twrp set tw_mtp_debug 1
 	 */
 	twrpMtp *mtp = new twrpMtp(DataManager::GetIntValue("tw_mtp_debug"));
-	for (iter = Partitions.begin(); iter != Partitions.end(); iter++) {
-		if ((*iter)->Is_Storage && (*iter)->Is_Present && (*iter)->Mount(false)) {
-			printf("twrp addStorage %s, mtpstorageid: %u, maxFileSize: %lld\n", (*iter)->Storage_Path.c_str(), (*iter)->MTP_Storage_ID, (*iter)->Get_Max_FileSize());
-			mtp->addStorage((*iter)->Storage_Name, (*iter)->Storage_Path, (*iter)->MTP_Storage_ID, (*iter)->Get_Max_FileSize());
-			count++;
-		}
-	}
-	if (count) {
-		mtppid = mtp->forkserver(mtppipe);
-		if (mtppid) {
-			close(mtppipe[0]); // Host closes read side
-			mtp_write_fd = mtppipe[1];
-			DataManager::SetValue("tw_mtp_enabled", 1);
-			return true;
-		} else {
-			close(mtppipe[0]);
-			close(mtppipe[1]);
-			LOGERR("Failed to enable MTP\n");
-			return false;
-		}
+	mtppid = mtp->forkserver(mtppipe);
+	if (mtppid) {
+		close(mtppipe[0]); // Host closes read side
+		mtp_write_fd = mtppipe[1];
+		DataManager::SetValue("tw_mtp_enabled", 1);
+		Add_All_MTP_Storage();
+		return true;
 	} else {
 		close(mtppipe[0]);
 		close(mtppipe[1]);
+		LOGERR("Failed to enable MTP\n");
+		return false;
 	}
-	LOGERR("No valid storage partitions found for MTP.\n");
 #else
 	LOGERR("MTP support not included\n");
 #endif
 	DataManager::SetValue("tw_mtp_enabled", 0);
 	return false;
+}
+
+void TWPartitionManager::Add_All_MTP_Storage(void) {
+#ifdef TW_HAS_MTP
+	std::vector<TWPartition*>::iterator iter;
+
+	if (!mtppid)
+		return; // MTP is not enabled
+
+	for (iter = Partitions.begin(); iter != Partitions.end(); iter++) {
+		if ((*iter)->Is_Storage && (*iter)->Is_Present && (*iter)->Mount(false))
+			Add_Remove_MTP_Storage((*iter), MTP_MESSAGE_ADD_STORAGE);
+	}
+#else
+	return;
+#endif
 }
 
 bool TWPartitionManager::Disable_MTP(void) {
@@ -2052,7 +2125,7 @@ bool TWPartitionManager::Add_Remove_MTP_Storage(TWPartition* Part, int message_t
 			mtp_message.path = Part->Storage_Path.c_str();
 			mtp_message.display = Part->Storage_Name.c_str();
 			mtp_message.maxFileSize = Part->Get_Max_FileSize();
-			LOGINFO("sending message to add %i '%s'\n", Part->MTP_Storage_ID, mtp_message.path);
+			LOGINFO("sending message to add %i '%s' '%s'\n", mtp_message.storage_id, mtp_message.path, mtp_message.display);
 			if (write(mtp_write_fd, &mtp_message, sizeof(mtp_message)) <= 0) {
 				LOGINFO("error sending message to add storage %i\n", Part->MTP_Storage_ID);
 				return false;

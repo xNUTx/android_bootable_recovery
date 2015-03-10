@@ -25,7 +25,8 @@ LOCAL_SRC_FILES := \
     input.cpp \
     blanktimer.cpp \
     partitionlist.cpp \
-    mousecursor.cpp
+    mousecursor.cpp \
+    scrolllist.cpp
 
 ifneq ($(TWRP_CUSTOM_KEYBOARD),)
   LOCAL_SRC_FILES += $(TWRP_CUSTOM_KEYBOARD)
@@ -61,6 +62,9 @@ ifneq ($(TW_X_OFFSET),)
 endif
 ifneq ($(TW_Y_OFFSET),)
   LOCAL_CFLAGS += -DTW_Y_OFFSET=$(TW_Y_OFFSET)
+endif
+ifeq ($(TW_ROUND_SCREEN), true)
+  LOCAL_CFLAGS += -DTW_ROUND_SCREEN
 endif
 
 ifeq ($(DEVICE_RESOLUTION),)

@@ -36,6 +36,8 @@ void gr_flip(void);
 int gr_fb_blank(int blank);
 
 void gr_color(unsigned char r, unsigned char g, unsigned char b, unsigned char a);
+void gr_clip(int x, int y, int w, int h);
+void gr_noclip();
 void gr_fill(int x, int y, int w, int h);
 
 int gr_textEx(int x, int y, const char *s, void* font);
@@ -67,6 +69,7 @@ unsigned int gr_get_height(gr_surface surface);
 int gr_get_surface(gr_surface* surface);
 int gr_free_surface(gr_surface surface);
 
+// Functions in graphics_utils.c
 int gr_save_screenshot(const char *dest);
 
 // input event structure, include <linux/input.h> for the definition.
@@ -75,7 +78,7 @@ struct input_event;
 
 int ev_init(void);
 void ev_exit(void);
-int ev_get(struct input_event *ev, unsigned dont_wait);
+int ev_get(struct input_event *ev, int timeout_ms);
 int ev_has_mouse(void);
 
 // Resources
@@ -83,6 +86,7 @@ int ev_has_mouse(void);
 // Returns 0 if no error, else negative.
 int res_create_surface(const char* name, gr_surface* pSurface);
 void res_free_surface(gr_surface surface);
+int res_scale_surface(gr_surface source, gr_surface* destination, float scale_w, float scale_h);
 
 // Needed for AOSP:
 int ev_wait(int timeout);

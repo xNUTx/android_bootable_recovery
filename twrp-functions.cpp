@@ -35,6 +35,7 @@
 #include <iostream>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 #include "twrp-functions.hpp"
 #include "twcommon.h"
 #ifndef BUILD_TWRPTAR_MAIN
@@ -585,7 +586,7 @@ int TWFunc::removeDir(const string path, bool skipParent) {
 	string new_path;
 
 	if (d == NULL) {
-		LOGERR("Error opening '%s'\n", path.c_str());
+		LOGERR("Error opening dir: '%s'\n", path.c_str());
 		return -1;
 	}
 
@@ -814,7 +815,7 @@ void TWFunc::Auto_Generate_Backup_Name() {
 		return;
 	}
 	string Backup_Name = Get_Current_Date();
-	Backup_Name += " " + propvalue;
+	Backup_Name += "_" + propvalue;
 	if (Backup_Name.size() > MAX_BACKUP_NAME_LEN)
 		Backup_Name.resize(MAX_BACKUP_NAME_LEN);
 	// Trailing spaces cause problems on some file systems, so remove them
@@ -824,6 +825,7 @@ void TWFunc::Auto_Generate_Backup_Name() {
 		Backup_Name.resize(Backup_Name.size() - 1);
 		space_check = Backup_Name.substr(Backup_Name.size() - 1, 1);
 	}
+	replace(Backup_Name.begin(), Backup_Name.end(), ' ', '_');
 	DataManager::SetValue(TW_BACKUP_NAME, Backup_Name);
 	if (PartitionManager.Check_Backup_Name(false) != 0) {
 		LOGINFO("Auto generated backup name '%s' contains invalid characters, using date instead.\n", Backup_Name.c_str());
@@ -864,7 +866,7 @@ void TWFunc::Fixup_Time_On_Boot()
 
 	}
 
-	LOGINFO("TWFunc::Fixup_Time: will attempt to use the ats files now.\n", sepoch.c_str());
+	LOGINFO("TWFunc::Fixup_Time: will attempt to use the ats files now.\n");
 
 	// Devices with Qualcomm Snapdragon 800 do some shenanigans with RTC.
 	// They never set it, it just ticks forward from 1970-01-01 00:00,
@@ -1036,6 +1038,18 @@ std::string TWFunc::to_string(unsigned long value) {
 	std::ostringstream os;
 	os << value;
 	return os.str();
+}
+
+void TWFunc::Disable_Stock_Recovery_Replace(void) {
+	if (PartitionManager.Mount_By_Path("/system", false)) {
+		// Disable flashing of stock recovery
+		if (TWFunc::Path_Exists("/system/recovery-from-boot.p")) {
+			rename("/system/recovery-from-boot.p", "/system/recovery-from-boot.bak");
+			gui_print("Renamed stock recovery file in /system to prevent\nthe stock ROM from replacing TWRP.\n");
+			sync();
+		}
+		PartitionManager.UnMount_By_Path("/system", false);
+	}
 }
 
 #endif // ndef BUILD_TWRPTAR_MAIN
