@@ -180,6 +180,11 @@ static int vk_init(struct ev *e)
         printf("blacklisting %s input device\n", e->deviceName);
         e->ignored = 1;
     }
+    if (strcmp(e->deviceName, "l3gd20_gyr") == 0 || strcmp(e->deviceName, "lsm303dlhc_acc_lt") == 0)
+    {
+        printf("blacklisting %s input device\n", e->deviceName);
+        e->ignored = 1;
+    }
 #else
     char* bl = strdup(EXPAND(TW_INPUT_BLACKLIST));
     char* blacklist = strtok(bl, "\n");
